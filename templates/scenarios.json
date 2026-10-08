@@ -1,0 +1,354 @@
+{
+  "scenarios": [
+    {
+      "id": "public_storage_bucket",
+      "name": "Bucket de stockage public oublié",
+      "rtk_module": "buckets.enum_buckets (RTK-04)",
+      "category": "Cloud Storage",
+      "severity": "high",
+      "description": "Simule un bucket de sauvegarde créé selon une convention de nommage prévisible (org-env-suffix) et laissé en lecture anonyme (allUsers / Everyone / AllUsers).",
+      "clouds": [
+        "aws",
+        "azure",
+        "gcp"
+      ],
+      "parameters": [
+        {
+          "key": "org",
+          "label": "Organisation / préfixe",
+          "default": "acme"
+        },
+        {
+          "key": "env",
+          "label": "Environnement",
+          "default": "dev"
+        },
+        {
+          "key": "suffix",
+          "label": "Suffixe du bucket",
+          "default": "backup"
+        },
+        {
+          "key": "engagement_id",
+          "label": "ID d'engagement",
+          "default": "ENG-2026-LAB"
+        },
+        {
+          "key": "region",
+          "label": "Région / Location",
+          "default": "",
+          "cloud_defaults": {
+            "aws": "eu-west-3",
+            "azure": "westeurope",
+            "gcp": "europe-west1"
+          }
+        }
+      ],
+      "scripts": {
+        "aws": "#!/usr/bin/env bash\n# Scénario RTK-04 — bucket S3 public oublié (AWS CloudShell)\nset -euo pipefail\nBUCKET=\"{{org}}-{{env}}-{{suffix}}\"\nREGION=\"{{region}}\"\n\naws s3api create-bucket --bucket \"$BUCKET\" --region \"$REGION\" \\\n  --create-bucket-configuration LocationConstraint=\"$REGION\"\n\necho \"decoy-internal-report\" > decoy.txt\naws s3 cp decoy.txt \"s3://$BUCKET/decoy.txt\"\n\n# Mauvaise configuration volontaire : accès public en lecture\naws s3api put-public-access-block --bucket \"$BUCKET\" \\\n  --public-access-block-configuration BlockPublicAcls=false,IgnorePublicAcls=false,BlockPublicPolicy=false,RestrictPublicBuckets=false\naws s3api put-bucket-policy --bucket \"$BUCKET\" --policy '{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [{\n    \"Sid\": \"PublicReadDecoy\",\n    \"Effect\": \"Allow\",\n    \"Principal\": \"*\",\n    \"Action\": \"s3:GetObject\",\n    \"Resource\": \"arn:aws:s3:::'\"$BUCKET\"'/*\"\n  }]\n}'\n\n# Tags pour traçabilité / nettoyage\naws s3api put-bucket-tagging --bucket \"$BUCKET\" --tagging '{\n  \"TagSet\": [\n    {\"Key\": \"redteam\", \"Value\": \"authorized\"},\n    {\"Key\": \"engagement\", \"Value\": \"{{engagement_id}}\"}\n  ]\n}'\n\n# Activer les logs d'accès serveur (pour consultation ultérieure)\naws s3api create-bucket --bucket \"${BUCKET}-logs-sink\" --region \"$REGION\" \\\n  --create-bucket-configuration LocationConstraint=\"$REGION\" || true\naws s3api put-bucket-logging --bucket \"$BUCKET\" --bucket-logging-status '{\n  \"LoggingEnabled\": {\"TargetBucket\": \"'\"$BUCKET\"'-logs-sink\", \"TargetPrefix\": \"access-logs/\"}\n}'\n\necho \"Bucket public créé : s3://$BUCKET (region $REGION)\"\n",
+        "azure": "#!/usr/bin/env bash\n# Scénario RTK-04 — conteneur Blob public oublié (Azure Cloud Shell)\nset -euo pipefail\nSTORAGE_ACCOUNT=\"{{org}}{{env}}{{suffix}}\" # doit être alphanumérique, en minuscules\nCONTAINER=\"{{suffix}}\"\nRESOURCE_GROUP=\"rg-{{org}}-{{env}}-lab\"\nLOCATION=\"{{region}}\"\n\naz group create --name \"$RESOURCE_GROUP\" --location \"$LOCATION\" \\\n  --tags redteam=authorized engagement=\"{{engagement_id}}\"\n\naz storage account create --name \"$STORAGE_ACCOUNT\" --resource-group \"$RESOURCE_GROUP\" \\\n  --location \"$LOCATION\" --sku Standard_LRS --allow-blob-public-access true \\\n  --tags redteam=authorized engagement=\"{{engagement_id}}\"\n\nKEY=$(az storage account keys list --account-name \"$STORAGE_ACCOUNT\" \\\n  --resource-group \"$RESOURCE_GROUP\" --query \"[0].value\" -o tsv)\n\naz storage container create --name \"$CONTAINER\" --account-name \"$STORAGE_ACCOUNT\" \\\n  --account-key \"$KEY\" --public-access blob     # <- la mauvaise config testée\n\necho \"decoy-internal-report\" > decoy.txt\naz storage blob upload --account-name \"$STORAGE_ACCOUNT\" --account-key \"$KEY\" \\\n  --container-name \"$CONTAINER\" --name decoy.txt --file decoy.txt\n\n# Activer les logs de diagnostic (pour consultation ultérieure)\naz monitor diagnostic-settings create --name storage-diag \\\n  --resource \"$(az storage account show -n $STORAGE_ACCOUNT -g $RESOURCE_GROUP --query id -o tsv)\" \\\n  --logs '[{\"category\": \"StorageRead\", \"enabled\": true}]' \\\n  --storage-account \"$STORAGE_ACCOUNT\" || true\n\necho \"Conteneur public créé : https://$STORAGE_ACCOUNT.blob.core.windows.net/$CONTAINER\"\n",
+        "gcp": "#!/usr/bin/env bash\n# Scénario RTK-04 — bucket GCS public oublié (Google Cloud Shell)\nset -euo pipefail\nBUCKET=\"{{org}}-{{env}}-{{suffix}}\"\nREGION=\"{{region}}\"\n\ngsutil mb -l \"$REGION\" \"gs://$BUCKET\"\necho \"decoy-internal-report\" > decoy.txt\ngsutil cp decoy.txt \"gs://$BUCKET/decoy.txt\"\n\ngsutil uniformbucketlevelaccess set on \"gs://$BUCKET\"\ngsutil iam ch allUsers:objectViewer \"gs://$BUCKET\"   # <- la mauvaise config testée\n\ngsutil label ch -l redteam:authorized \"gs://$BUCKET\"\ngsutil label ch -l engagement:{{engagement_id}} \"gs://$BUCKET\"\n\ngsutil mb -l \"$REGION\" \"gs://{{org}}-logs-sink\" || true\ngsutil logging set on -b \"gs://{{org}}-logs-sink\" \"gs://$BUCKET\"\n\necho \"Bucket public créé : gs://$BUCKET (region $REGION)\"\n"
+      },
+      "cleanup": {
+        "aws": "aws s3 rm \"s3://{{org}}-{{env}}-{{suffix}}\" --recursive\naws s3api delete-bucket --bucket \"{{org}}-{{env}}-{{suffix}}\" --region \"{{region}}\"\naws s3 rm \"s3://{{org}}-{{env}}-{{suffix}}-logs-sink\" --recursive || true\naws s3api delete-bucket --bucket \"{{org}}-{{env}}-{{suffix}}-logs-sink\" --region \"{{region}}\" || true\n",
+        "azure": "az group delete --name \"rg-{{org}}-{{env}}-lab\" --yes --no-wait\n",
+        "gcp": "gsutil -m rm -r \"gs://{{org}}-{{env}}-{{suffix}}\"\ngsutil -m rm -r \"gs://{{org}}-logs-sink\" || true\n"
+      }
+    },
+    {
+      "id": "cors_traversal_container",
+      "name": "Service conteneurisé CORS permissif + traversée de chemin",
+      "rtk_module": "buckets.cors_traversal (RTK-05)",
+      "category": "Applications conteneurisées",
+      "severity": "high / critical",
+      "description": "Déploie un petit service HTTP (type « serveur de tuiles » legacy oublié) qui reflète l'en-tête Origin avec Access-Control-Allow-Credentials=true et ne filtre pas le chemin demandé (traversée de répertoire possible).",
+      "clouds": [
+        "aws",
+        "azure",
+        "gcp"
+      ],
+      "parameters": [
+        {
+          "key": "service_name",
+          "label": "Nom du service / conteneur",
+          "default": "legacy-tile-server"
+        },
+        {
+          "key": "container_image",
+          "label": "Image conteneur (registre)",
+          "default": "legacy-tile-server:latest"
+        },
+        {
+          "key": "engagement_id",
+          "label": "ID d'engagement",
+          "default": "ENG-2026-LAB"
+        },
+        {
+          "key": "region",
+          "label": "Région / Location",
+          "default": "",
+          "cloud_defaults": {
+            "aws": "eu-west-3",
+            "azure": "westeurope",
+            "gcp": "europe-west1"
+          }
+        }
+      ],
+      "scripts": {
+        "aws": "#!/usr/bin/env bash\n# Scénario RTK-05 — service CORS permissif + traversée (AWS CloudShell, App Runner)\nset -euo pipefail\nSERVICE=\"{{service_name}}\"\nREGION=\"{{region}}\"\nREPO=\"{{service_name}}\"\n\nmkdir -p app/tiles\ncat > app/app.py << 'PYEOF'\nimport os\nfrom flask import Flask, request, send_from_directory, Response\napp = Flask(__name__)\nBASE_DIR = \"/app/tiles\"\n\n@app.route(\"/<path:filepath>\", methods=[\"GET\", \"OPTIONS\"])\ndef serve(filepath):\n    if request.method == \"OPTIONS\":\n        resp = Response(status=204)\n    else:\n        resp = send_from_directory(BASE_DIR, filepath)  # pas de sanitisation -> traversée\n    origin = request.headers.get(\"Origin\", \"*\")\n    resp.headers[\"Access-Control-Allow-Origin\"] = origin\n    resp.headers[\"Access-Control-Allow-Credentials\"] = \"true\"\n    return resp\n\nif __name__ == \"__main__\":\n    app.run(host=\"0.0.0.0\", port=int(os.environ.get(\"PORT\", 8080)))\nPYEOF\necho \"fake-tile-data\" > app/tiles/tile_1_1.png\necho \"TOP-SECRET-DECOY\" > app/secret.txt\ncat > app/Dockerfile << 'EOF'\nFROM python:3.12-slim\nRUN pip install flask\nWORKDIR /app\nCOPY app.py .\nCOPY tiles /app/tiles\nCOPY secret.txt /app/secret.txt\nCMD [\"python\", \"app.py\"]\nEOF\n\naws ecr create-repository --repository-name \"$REPO\" --region \"$REGION\" || true\nACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)\nECR_URI=\"$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPO\"\naws ecr get-login-password --region \"$REGION\" | docker login --username AWS --password-stdin \"$ECR_URI\"\ndocker build -t \"$ECR_URI:latest\" app/\ndocker push \"$ECR_URI:latest\"\n\naws apprunner create-service --service-name \"$SERVICE\" --region \"$REGION\" \\\n  --source-configuration \"{\\\"ImageRepository\\\":{\\\"ImageIdentifier\\\":\\\"$ECR_URI:latest\\\",\\\"ImageRepositoryType\\\":\\\"ECR\\\",\\\"ImageConfiguration\\\":{\\\"Port\\\":\\\"8080\\\"}},\\\"AutoDeploymentsEnabled\\\":false}\" \\\n  --tags Key=redteam,Value=authorized Key=engagement,Value={{engagement_id}}\n\necho \"Service déployé : $SERVICE (consultez l'URL App Runner dans la console)\"\n",
+        "azure": "#!/usr/bin/env bash\n# Scénario RTK-05 — service CORS permissif + traversée (Azure Cloud Shell, Container Apps)\nset -euo pipefail\nSERVICE=\"{{service_name}}\"\nLOCATION=\"{{region}}\"\nRESOURCE_GROUP=\"rg-$SERVICE-lab\"\nENV_NAME=\"$SERVICE-env\"\n\nmkdir -p app/tiles\ncat > app/app.py << 'PYEOF'\nimport os\nfrom flask import Flask, request, send_from_directory, Response\napp = Flask(__name__)\nBASE_DIR = \"/app/tiles\"\n\n@app.route(\"/<path:filepath>\", methods=[\"GET\", \"OPTIONS\"])\ndef serve(filepath):\n    if request.method == \"OPTIONS\":\n        resp = Response(status=204)\n    else:\n        resp = send_from_directory(BASE_DIR, filepath)\n    origin = request.headers.get(\"Origin\", \"*\")\n    resp.headers[\"Access-Control-Allow-Origin\"] = origin\n    resp.headers[\"Access-Control-Allow-Credentials\"] = \"true\"\n    return resp\n\nif __name__ == \"__main__\":\n    app.run(host=\"0.0.0.0\", port=int(os.environ.get(\"PORT\", 8080)))\nPYEOF\necho \"fake-tile-data\" > app/tiles/tile_1_1.png\necho \"TOP-SECRET-DECOY\" > app/secret.txt\ncat > app/Dockerfile << 'EOF'\nFROM python:3.12-slim\nRUN pip install flask\nWORKDIR /app\nCOPY app.py .\nCOPY tiles /app/tiles\nCOPY secret.txt /app/secret.txt\nCMD [\"python\", \"app.py\"]\nEOF\n\naz group create --name \"$RESOURCE_GROUP\" --location \"$LOCATION\" \\\n  --tags redteam=authorized engagement=\"{{engagement_id}}\"\naz containerapp env create --name \"$ENV_NAME\" --resource-group \"$RESOURCE_GROUP\" --location \"$LOCATION\"\naz containerapp up --name \"$SERVICE\" --resource-group \"$RESOURCE_GROUP\" \\\n  --environment \"$ENV_NAME\" --source ./app --ingress external --target-port 8080\n\necho \"Service déployé : az containerapp show -n $SERVICE -g $RESOURCE_GROUP --query properties.configuration.ingress.fqdn\"\n",
+        "gcp": "#!/usr/bin/env bash\n# Scénario RTK-05 — service CORS permissif + traversée (Google Cloud Shell, Cloud Run)\nset -euo pipefail\nSERVICE=\"{{service_name}}\"\nREGION=\"{{region}}\"\nPROJECT=$(gcloud config get-value project)\n\nmkdir -p app/tiles\ncat > app/app.py << 'PYEOF'\nimport os\nfrom flask import Flask, request, send_from_directory, Response\napp = Flask(__name__)\nBASE_DIR = \"/app/tiles\"\n\n@app.route(\"/<path:filepath>\", methods=[\"GET\", \"OPTIONS\"])\ndef serve(filepath):\n    if request.method == \"OPTIONS\":\n        resp = Response(status=204)\n    else:\n        resp = send_from_directory(BASE_DIR, filepath)\n    origin = request.headers.get(\"Origin\", \"*\")\n    resp.headers[\"Access-Control-Allow-Origin\"] = origin\n    resp.headers[\"Access-Control-Allow-Credentials\"] = \"true\"\n    return resp\n\nif __name__ == \"__main__\":\n    app.run(host=\"0.0.0.0\", port=int(os.environ.get(\"PORT\", 8080)))\nPYEOF\necho \"fake-tile-data\" > app/tiles/tile_1_1.png\necho \"TOP-SECRET-DECOY\" > app/secret.txt\ncat > app/Dockerfile << 'EOF'\nFROM python:3.12-slim\nRUN pip install flask\nWORKDIR /app\nCOPY app.py .\nCOPY tiles /app/tiles\nCOPY secret.txt /app/secret.txt\nCMD [\"python\", \"app.py\"]\nEOF\n\ngcloud builds submit app/ --tag \"gcr.io/$PROJECT/$SERVICE\"\ngcloud run deploy \"$SERVICE\" --image \"gcr.io/$PROJECT/$SERVICE\" --region \"$REGION\" \\\n  --allow-unauthenticated --labels redteam=authorized,engagement={{engagement_id}}\n\necho \"Service déployé : $(gcloud run services describe $SERVICE --region $REGION --format='value(status.url)')\"\n"
+      },
+      "cleanup": {
+        "aws": "aws apprunner list-services --region \"{{region}}\" --query \"ServiceSummaryList[?ServiceName=='{{service_name}}'].ServiceArn\" --output text | \\\n  xargs -I{} aws apprunner delete-service --region \"{{region}}\" --service-arn {}\naws ecr delete-repository --repository-name \"{{service_name}}\" --region \"{{region}}\" --force || true\n",
+        "azure": "az group delete --name \"rg-{{service_name}}-lab\" --yes --no-wait\n",
+        "gcp": "gcloud run services delete \"{{service_name}}\" --region \"{{region}}\" -q\n"
+      }
+    },
+    {
+      "id": "geoserver_wms_anonymous",
+      "name": "Serveur GeoServer (WMS/WFS) anonyme avec couche sensible",
+      "rtk_module": "gis_meteo.ogc_anonymous_access (RTK-20)",
+      "category": "GIS / Météo",
+      "severity": "high",
+      "description": "Déploie un GeoServer accessible anonymement et publie une couche dont le nom correspond à des motifs sensibles (internal, rgpd, données employés...).",
+      "clouds": [
+        "aws",
+        "azure",
+        "gcp"
+      ],
+      "parameters": [
+        {
+          "key": "service_name",
+          "label": "Nom du service",
+          "default": "geoserver-lab"
+        },
+        {
+          "key": "admin_password",
+          "label": "Mot de passe admin (lab uniquement)",
+          "default": "ChangeMeLab123!"
+        },
+        {
+          "key": "sensitive_layer_name",
+          "label": "Nom de la couche sensible",
+          "default": "donnees_rgpd_employes"
+        },
+        {
+          "key": "engagement_id",
+          "label": "ID d'engagement",
+          "default": "ENG-2026-LAB"
+        },
+        {
+          "key": "region",
+          "label": "Région / Location",
+          "default": "",
+          "cloud_defaults": {
+            "aws": "eu-west-3",
+            "azure": "westeurope",
+            "gcp": "europe-west1"
+          }
+        }
+      ],
+      "scripts": {
+        "aws": "#!/usr/bin/env bash\n# Scénario RTK-20 — GeoServer anonyme (AWS CloudShell, App Runner + image publique kartoza/geoserver)\nset -euo pipefail\nSERVICE=\"{{service_name}}\"\nREGION=\"{{region}}\"\n\naws apprunner create-service --service-name \"$SERVICE\" --region \"$REGION\" \\\n  --source-configuration '{\"ImageRepository\":{\"ImageIdentifier\":\"public.ecr.aws/docker/library/kartoza/geoserver:2.25.1\",\"ImageRepositoryType\":\"ECR_PUBLIC\",\"ImageConfiguration\":{\"Port\":\"8080\",\"RuntimeEnvironmentVariables\":{\"GEOSERVER_ADMIN_USER\":\"admin\",\"GEOSERVER_ADMIN_PASSWORD\":\"{{admin_password}}\"}}},\"AutoDeploymentsEnabled\":false}' \\\n  --tags Key=redteam,Value=authorized Key=engagement,Value={{engagement_id}}\n\nGS_URL=$(aws apprunner describe-service --region \"$REGION\" \\\n  --service-arn \"$(aws apprunner list-services --region $REGION --query \"ServiceSummaryList[?ServiceName=='$SERVICE'].ServiceArn\" --output text)\" \\\n  --query \"Service.ServiceUrl\" --output text)\nGS_URL=\"https://$GS_URL\"\n\ncurl -u admin:{{admin_password}} -XPOST -H \"Content-type: text/xml\" \\\n  -d \"<workspace><name>lab</name></workspace>\" \"$GS_URL/geoserver/rest/workspaces\"\ncurl -u admin:{{admin_password}} -XPOST -H \"Content-type: application/json\" \\\n  -d '{\"dataStore\":{\"name\":\"sample\",\"connectionParameters\":{\"entry\":[{\"@key\":\"directory\",\"$\":\"file:data/shapefiles\"}]}}}' \\\n  \"$GS_URL/geoserver/rest/workspaces/lab/datastores\"\ncurl -u admin:{{admin_password}} -XPOST -H \"Content-type: text/xml\" \\\n  -d \"<featureType><name>{{sensitive_layer_name}}</name><nativeName>archsites</nativeName></featureType>\" \\\n  \"$GS_URL/geoserver/rest/workspaces/lab/datastores/sample/featuretypes\"\n\necho \"GeoServer déployé : $GS_URL\"\n",
+        "azure": "#!/usr/bin/env bash\n# Scénario RTK-20 — GeoServer anonyme (Azure Cloud Shell, Container Apps)\nset -euo pipefail\nSERVICE=\"{{service_name}}\"\nLOCATION=\"{{region}}\"\nRESOURCE_GROUP=\"rg-$SERVICE-lab\"\nENV_NAME=\"$SERVICE-env\"\n\naz group create --name \"$RESOURCE_GROUP\" --location \"$LOCATION\" \\\n  --tags redteam=authorized engagement=\"{{engagement_id}}\"\naz containerapp env create --name \"$ENV_NAME\" --resource-group \"$RESOURCE_GROUP\" --location \"$LOCATION\"\naz containerapp create --name \"$SERVICE\" --resource-group \"$RESOURCE_GROUP\" \\\n  --environment \"$ENV_NAME\" --image docker.io/kartoza/geoserver:2.25.1 \\\n  --target-port 8080 --ingress external \\\n  --env-vars GEOSERVER_ADMIN_USER=admin GEOSERVER_ADMIN_PASSWORD=\"{{admin_password}}\"\n\nGS_URL=\"https://$(az containerapp show -n $SERVICE -g $RESOURCE_GROUP --query properties.configuration.ingress.fqdn -o tsv)\"\n\ncurl -u admin:{{admin_password}} -XPOST -H \"Content-type: text/xml\" \\\n  -d \"<workspace><name>lab</name></workspace>\" \"$GS_URL/geoserver/rest/workspaces\"\ncurl -u admin:{{admin_password}} -XPOST -H \"Content-type: application/json\" \\\n  -d '{\"dataStore\":{\"name\":\"sample\",\"connectionParameters\":{\"entry\":[{\"@key\":\"directory\",\"$\":\"file:data/shapefiles\"}]}}}' \\\n  \"$GS_URL/geoserver/rest/workspaces/lab/datastores\"\ncurl -u admin:{{admin_password}} -XPOST -H \"Content-type: text/xml\" \\\n  -d \"<featureType><name>{{sensitive_layer_name}}</name><nativeName>archsites</nativeName></featureType>\" \\\n  \"$GS_URL/geoserver/rest/workspaces/lab/datastores/sample/featuretypes\"\n\necho \"GeoServer déployé : $GS_URL\"\n",
+        "gcp": "#!/usr/bin/env bash\n# Scénario RTK-20 — GeoServer anonyme (Google Cloud Shell, Cloud Run)\nset -euo pipefail\nSERVICE=\"{{service_name}}\"\nREGION=\"{{region}}\"\n\ngcloud run deploy \"$SERVICE\" --image docker.io/kartoza/geoserver:2.25.1 --region \"$REGION\" \\\n  --memory 2Gi --allow-unauthenticated \\\n  --set-env-vars GEOSERVER_ADMIN_USER=admin,GEOSERVER_ADMIN_PASSWORD={{admin_password}} \\\n  --labels redteam=authorized,engagement={{engagement_id}}\n\nGS_URL=$(gcloud run services describe \"$SERVICE\" --region \"$REGION\" --format='value(status.url)')\n\ncurl -u admin:{{admin_password}} -XPOST -H \"Content-type: text/xml\" \\\n  -d \"<workspace><name>lab</name></workspace>\" \"$GS_URL/geoserver/rest/workspaces\"\ncurl -u admin:{{admin_password}} -XPOST -H \"Content-type: application/json\" \\\n  -d '{\"dataStore\":{\"name\":\"sample\",\"connectionParameters\":{\"entry\":[{\"@key\":\"directory\",\"$\":\"file:data/shapefiles\"}]}}}' \\\n  \"$GS_URL/geoserver/rest/workspaces/lab/datastores\"\ncurl -u admin:{{admin_password}} -XPOST -H \"Content-type: text/xml\" \\\n  -d \"<featureType><name>{{sensitive_layer_name}}</name><nativeName>archsites</nativeName></featureType>\" \\\n  \"$GS_URL/geoserver/rest/workspaces/lab/datastores/sample/featuretypes\"\n\necho \"GeoServer déployé : $GS_URL\"\n"
+      },
+      "cleanup": {
+        "aws": "aws apprunner list-services --region \"{{region}}\" --query \"ServiceSummaryList[?ServiceName=='{{service_name}}'].ServiceArn\" --output text | \\\n  xargs -I{} aws apprunner delete-service --region \"{{region}}\" --service-arn {}\n",
+        "azure": "az group delete --name \"rg-{{service_name}}-lab\" --yes --no-wait\n",
+        "gcp": "gcloud run services delete \"{{service_name}}\" --region \"{{region}}\" -q\n"
+      }
+    },
+    {
+      "id": "secrets_in_repo",
+      "name": "Clé de service account committée puis supprimée dans un dépôt",
+      "rtk_module": "secrets.multi_repo_scan (RTK-01)",
+      "category": "Secrets",
+      "severity": "critical",
+      "description": "Un dépôt Git de lab reçoit un commit contenant une clé de service factice, puis un second commit qui la supprime — le secret reste récupérable dans l'historique Git (testé par gitleaks).",
+      "clouds": [
+        "aws",
+        "azure",
+        "gcp"
+      ],
+      "parameters": [
+        {
+          "key": "repo_name",
+          "label": "Nom du dépôt",
+          "default": "lab-rtk-secrets"
+        },
+        {
+          "key": "decoy_identity_name",
+          "label": "Nom de l'identité factice (SA/SP)",
+          "default": "lab-decoy-sa"
+        },
+        {
+          "key": "engagement_id",
+          "label": "ID d'engagement",
+          "default": "ENG-2026-LAB"
+        },
+        {
+          "key": "region",
+          "label": "Région / Location",
+          "default": "",
+          "cloud_defaults": {
+            "aws": "eu-west-3",
+            "azure": "westeurope",
+            "gcp": "europe-west1"
+          }
+        }
+      ],
+      "scripts": {
+        "aws": "#!/usr/bin/env bash\n# Scénario RTK-01 — secret committé puis supprimé (AWS CloudShell, CodeCommit)\nset -euo pipefail\nREPO=\"{{repo_name}}\"\nUSER=\"{{decoy_identity_name}}\"\nREGION=\"{{region}}\"\n\naws codecommit create-repository --repository-name \"$REPO\" --region \"$REGION\" \\\n  --tags redteam=authorized,engagement={{engagement_id}}\n\naws iam create-user --user-name \"$USER\" --tags Key=redteam,Value=authorized\naws iam create-access-key --user-name \"$USER\" > decoy-key.json   # clé factice de lab\n\ngit clone \"codecommit::$REGION://$REPO\" \"$REPO\"\ncd \"$REPO\"\nmkdir -p config && cp ../decoy-key.json config/credentials.json\ngit add . && git commit -m \"add aws credentials (oops)\"\ngit rm config/credentials.json\ngit commit -m \"remove credentials\"   # <- le secret reste dans l'historique\ngit push origin main\n\n# Révoquer immédiatement la clé réelle côté IAM (but : tester la détection du commit)\nAK=$(jq -r '.AccessKey.AccessKeyId' ../decoy-key.json)\naws iam delete-access-key --user-name \"$USER\" --access-key-id \"$AK\"\n\necho \"Dépôt prêt : $REPO (secret récupérable dans l'historique Git)\"\n",
+        "azure": "#!/usr/bin/env bash\n# Scénario RTK-01 — secret committé puis supprimé (Azure Cloud Shell, Azure Repos)\nset -euo pipefail\nREPO=\"{{repo_name}}\"\nSP_NAME=\"{{decoy_identity_name}}\"\n\naz repos create --name \"$REPO\" --org \"$AZURE_DEVOPS_ORG_URL\" --project \"$AZURE_DEVOPS_PROJECT\"\n\naz ad sp create-for-rbac --name \"$SP_NAME\" --skip-assignment > decoy-key.json   # SP factice de lab\n\ngit clone \"$AZURE_DEVOPS_ORG_URL/$AZURE_DEVOPS_PROJECT/_git/$REPO\" \"$REPO\"\ncd \"$REPO\"\nmkdir -p config && cp ../decoy-key.json config/credentials.json\ngit add . && git commit -m \"add azure credentials (oops)\"\ngit rm config/credentials.json\ngit commit -m \"remove credentials\"   # <- le secret reste dans l'historique\ngit push origin main\n\nAPP_ID=$(jq -r '.appId' ../decoy-key.json)\naz ad sp delete --id \"$APP_ID\"   # révocation immédiate de l'identité factice\n\necho \"Dépôt prêt : $REPO (secret récupérable dans l'historique Git)\"\n",
+        "gcp": "#!/usr/bin/env bash\n# Scénario RTK-01 — secret committé puis supprimé (Google Cloud Shell, Cloud Source Repositories)\nset -euo pipefail\nREPO=\"{{repo_name}}\"\nSA=\"{{decoy_identity_name}}\"\nPROJECT=$(gcloud config get-value project)\n\ngcloud source repos create \"$REPO\" --project=\"$PROJECT\"\ngcloud iam service-accounts create \"$SA\" --project=\"$PROJECT\"\ngcloud iam service-accounts keys create decoy-key.json \\\n  --iam-account=\"$SA@$PROJECT.iam.gserviceaccount.com\"\n\ngit clone \"https://source.developers.google.com/p/$PROJECT/r/$REPO\" \"$REPO\"\ncd \"$REPO\"\nmkdir -p config && cp ../decoy-key.json config/credentials.json\ngit add . && git commit -m \"add gcp credentials (oops)\"\ngit rm config/credentials.json\ngit commit -m \"remove credentials\"   # <- le secret reste dans l'historique\ngit push origin main\n\nKEY_ID=$(jq -r '.private_key_id' ../decoy-key.json)\ngcloud iam service-accounts keys delete \"$KEY_ID\" \\\n  --iam-account=\"$SA@$PROJECT.iam.gserviceaccount.com\" -q\n\necho \"Dépôt prêt : $REPO (secret récupérable dans l'historique Git)\"\n"
+      },
+      "cleanup": {
+        "aws": "aws codecommit delete-repository --repository-name \"{{repo_name}}\" --region \"{{region}}\"\naws iam delete-user --user-name \"{{decoy_identity_name}}\" || true\n",
+        "azure": "az repos delete --id \"{{repo_name}}\" --org \"$AZURE_DEVOPS_ORG_URL\" --yes\n",
+        "gcp": "gcloud source repos delete \"{{repo_name}}\" -q\ngcloud iam service-accounts delete \"{{decoy_identity_name}}@$(gcloud config get-value project).iam.gserviceaccount.com\" -q || true\n"
+      }
+    },
+    {
+      "id": "error_leakage_service",
+      "name": "Service exposant des stack traces (mode debug actif)",
+      "rtk_module": "secrets.error_leakage (RTK-02)",
+      "category": "Secrets",
+      "severity": "high",
+      "description": "Déploie un service HTTP avec le mode debug laissé actif : un payload malformé déclenche une exception non interceptée qui renvoie la stack trace complète (et des secrets factices) dans la réponse 500.",
+      "clouds": [
+        "aws",
+        "azure",
+        "gcp"
+      ],
+      "parameters": [
+        {
+          "key": "service_name",
+          "label": "Nom du service",
+          "default": "error-leak-lab"
+        },
+        {
+          "key": "fake_api_key",
+          "label": "Clé API factice injectée (pour test de fuite)",
+          "default": "AIzaSyDECOY1234567890abcdefghijklmno12"
+        },
+        {
+          "key": "engagement_id",
+          "label": "ID d'engagement",
+          "default": "ENG-2026-LAB"
+        },
+        {
+          "key": "region",
+          "label": "Région / Location",
+          "default": "",
+          "cloud_defaults": {
+            "aws": "eu-west-3",
+            "azure": "westeurope",
+            "gcp": "europe-west1"
+          }
+        }
+      ],
+      "scripts": {
+        "aws": "#!/usr/bin/env bash\n# Scénario RTK-02 — fuite de stack trace (AWS CloudShell, App Runner)\nset -euo pipefail\nSERVICE=\"{{service_name}}\"\nREGION=\"{{region}}\"\n\nmkdir -p app\ncat > app/app.py << 'PYEOF'\nfrom flask import Flask, request\napp = Flask(__name__)\nFAKE_API_KEY = \"{{fake_api_key}}\"  # valeur factice, pas une vraie clé\n\n@app.route(\"/process\", methods=[\"POST\"])\ndef process():\n    data = request.get_json()  # lève une exception si JSON invalide -> stack trace exposée\n    return {\"id\": data[\"id\"]}\n\nif __name__ == \"__main__\":\n    app.run(host=\"0.0.0.0\", port=8080, debug=True)  # <- la faute : debug=True\nPYEOF\ncat > app/Dockerfile << 'EOF'\nFROM python:3.12-slim\nRUN pip install flask\nWORKDIR /app\nCOPY app.py .\nCMD [\"python\", \"app.py\"]\nEOF\n\naws ecr create-repository --repository-name \"$SERVICE\" --region \"$REGION\" || true\nACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)\nECR_URI=\"$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$SERVICE\"\naws ecr get-login-password --region \"$REGION\" | docker login --username AWS --password-stdin \"$ECR_URI\"\ndocker build -t \"$ECR_URI:latest\" app/\ndocker push \"$ECR_URI:latest\"\n\naws apprunner create-service --service-name \"$SERVICE\" --region \"$REGION\" \\\n  --source-configuration \"{\\\"ImageRepository\\\":{\\\"ImageIdentifier\\\":\\\"$ECR_URI:latest\\\",\\\"ImageRepositoryType\\\":\\\"ECR\\\",\\\"ImageConfiguration\\\":{\\\"Port\\\":\\\"8080\\\"}},\\\"AutoDeploymentsEnabled\\\":false}\" \\\n  --tags Key=redteam,Value=authorized Key=engagement,Value={{engagement_id}}\n\necho \"Service déployé : $SERVICE (endpoint /process)\"\n",
+        "azure": "#!/usr/bin/env bash\n# Scénario RTK-02 — fuite de stack trace (Azure Cloud Shell, Container Apps)\nset -euo pipefail\nSERVICE=\"{{service_name}}\"\nLOCATION=\"{{region}}\"\nRESOURCE_GROUP=\"rg-$SERVICE-lab\"\nENV_NAME=\"$SERVICE-env\"\n\nmkdir -p app\ncat > app/app.py << 'PYEOF'\nfrom flask import Flask, request\napp = Flask(__name__)\nFAKE_API_KEY = \"{{fake_api_key}}\"\n\n@app.route(\"/process\", methods=[\"POST\"])\ndef process():\n    data = request.get_json()\n    return {\"id\": data[\"id\"]}\n\nif __name__ == \"__main__\":\n    app.run(host=\"0.0.0.0\", port=8080, debug=True)\nPYEOF\ncat > app/Dockerfile << 'EOF'\nFROM python:3.12-slim\nRUN pip install flask\nWORKDIR /app\nCOPY app.py .\nCMD [\"python\", \"app.py\"]\nEOF\n\naz group create --name \"$RESOURCE_GROUP\" --location \"$LOCATION\" \\\n  --tags redteam=authorized engagement=\"{{engagement_id}}\"\naz containerapp env create --name \"$ENV_NAME\" --resource-group \"$RESOURCE_GROUP\" --location \"$LOCATION\"\naz containerapp up --name \"$SERVICE\" --resource-group \"$RESOURCE_GROUP\" \\\n  --environment \"$ENV_NAME\" --source ./app --ingress external --target-port 8080 \\\n  --env-vars \"GCP_API_KEY={{fake_api_key}}\"\n\necho \"Service déployé : $SERVICE (endpoint /process)\"\n",
+        "gcp": "#!/usr/bin/env bash\n# Scénario RTK-02 — fuite de stack trace (Google Cloud Shell, Cloud Run)\nset -euo pipefail\nSERVICE=\"{{service_name}}\"\nREGION=\"{{region}}\"\n\nmkdir -p app\ncat > app/app.py << 'PYEOF'\nfrom flask import Flask, request\napp = Flask(__name__)\nFAKE_API_KEY = \"{{fake_api_key}}\"\n\n@app.route(\"/process\", methods=[\"POST\"])\ndef process():\n    data = request.get_json()\n    return {\"id\": data[\"id\"]}\n\nif __name__ == \"__main__\":\n    app.run(host=\"0.0.0.0\", port=8080, debug=True)\nPYEOF\ncat > app/requirements.txt << 'EOF'\nflask\nEOF\n\ngcloud run deploy \"$SERVICE\" --source app --region \"$REGION\" --allow-unauthenticated \\\n  --set-env-vars \"GCP_API_KEY={{fake_api_key}}\" \\\n  --labels redteam=authorized,engagement={{engagement_id}}\n\necho \"Service déployé : $(gcloud run services describe $SERVICE --region $REGION --format='value(status.url)')/process\"\n"
+      },
+      "cleanup": {
+        "aws": "aws apprunner list-services --region \"{{region}}\" --query \"ServiceSummaryList[?ServiceName=='{{service_name}}'].ServiceArn\" --output text | \\\n  xargs -I{} aws apprunner delete-service --region \"{{region}}\" --service-arn {}\naws ecr delete-repository --repository-name \"{{service_name}}\" --region \"{{region}}\" --force || true\n",
+        "azure": "az group delete --name \"rg-{{service_name}}-lab\" --yes --no-wait\n",
+        "gcp": "gcloud run services delete \"{{service_name}}\" --region \"{{region}}\" -q\n"
+      }
+    },
+    {
+      "id": "iam_wildcard_role",
+      "name": "Rôle IAM personnalisé avec wildcard dangereux",
+      "rtk_module": "iam.wildcard_policies (RTK-07)",
+      "category": "IAM",
+      "severity": "high",
+      "description": "Crée un rôle/policy IAM personnalisé accordant Action:* / Resource:* (ou équivalent), puis exporte la policy au format attendu par le module RTK pour analyse locale.",
+      "clouds": [
+        "aws",
+        "azure",
+        "gcp"
+      ],
+      "parameters": [
+        {
+          "key": "role_name",
+          "label": "Nom du rôle / policy",
+          "default": "LabOverPermissiveRole"
+        },
+        {
+          "key": "engagement_id",
+          "label": "ID d'engagement",
+          "default": "ENG-2026-LAB"
+        },
+        {
+          "key": "region",
+          "label": "Région / Location",
+          "default": "",
+          "cloud_defaults": {
+            "aws": "eu-west-3",
+            "azure": "westeurope",
+            "gcp": "europe-west1"
+          }
+        }
+      ],
+      "scripts": {
+        "aws": "#!/usr/bin/env bash\n# Scénario RTK-07 — policy IAM trop permissive (AWS CloudShell)\nset -euo pipefail\nROLE=\"{{role_name}}\"\n\ncat > policy.json << 'EOF'\n{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [\n    { \"Effect\": \"Allow\", \"Action\": [\"*\"], \"Resource\": [\"*\"] }\n  ]\n}\nEOF\n\naws iam create-policy --policy-name \"$ROLE\" --policy-document file://policy.json \\\n  --tags Key=redteam,Value=authorized Key=engagement,Value={{engagement_id}}\n\nmkdir -p policies\ncat > policies/lab-role.json << 'EOF'\n{\n  \"Statement\": [\n    { \"Effect\": \"Allow\", \"Action\": [\"*\"], \"Resource\": [\"*\"] }\n  ]\n}\nEOF\n\necho \"Policy créée : $ROLE — fichier d'analyse RTK : policies/lab-role.json\"\n",
+        "azure": "#!/usr/bin/env bash\n# Scénario RTK-07 — rôle personnalisé trop permissif (Azure Cloud Shell)\nset -euo pipefail\nROLE=\"{{role_name}}\"\nSUB_ID=$(az account show --query id -o tsv)\n\ncat > role-def.json << EOF\n{\n  \"Name\": \"$ROLE\",\n  \"IsCustom\": true,\n  \"Description\": \"Rôle de lab volontairement trop permissif\",\n  \"Actions\": [\"*\"],\n  \"AssignableScopes\": [\"/subscriptions/$SUB_ID\"]\n}\nEOF\naz role definition create --role-definition role-def.json\n\nmkdir -p policies\ncat > policies/lab-role.json << 'EOF'\n{\n  \"Statement\": [\n    { \"Effect\": \"Allow\", \"Action\": [\"*\"], \"Resource\": [\"*\"] }\n  ]\n}\nEOF\n\necho \"Rôle créé : $ROLE — fichier d'analyse RTK : policies/lab-role.json\"\n",
+        "gcp": "#!/usr/bin/env bash\n# Scénario RTK-07 — rôle personnalisé trop permissif (Google Cloud Shell)\nset -euo pipefail\nROLE=\"{{role_name}}\"\nPROJECT=$(gcloud config get-value project)\n\ncat > role-def.yaml << 'EOF'\ntitle: \"{{role_name}}\"\nstage: \"GA\"\nincludedPermissions:\n  - \"*\"\nEOF\ngcloud iam roles create \"$ROLE\" --project=\"$PROJECT\" --file=role-def.yaml\n\nmkdir -p policies\ncat > policies/lab-role.json << 'EOF'\n{\n  \"Statement\": [\n    { \"Effect\": \"Allow\", \"Action\": [\"*\"], \"Resource\": [\"*\"] }\n  ]\n}\nEOF\n\necho \"Rôle créé : $ROLE — fichier d'analyse RTK : policies/lab-role.json\"\n"
+      },
+      "cleanup": {
+        "aws": "ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)\naws iam delete-policy --policy-arn \"arn:aws:iam::$ACCOUNT_ID:policy/{{role_name}}\"\n",
+        "azure": "az role definition delete --name \"{{role_name}}\"\n",
+        "gcp": "gcloud iam roles delete \"{{role_name}}\" --project=\"$(gcloud config get-value project)\" -q\n"
+      }
+    },
+    {
+      "id": "mcp_server_exposed",
+      "name": "Serveur MCP exposé (outil http_get sans allowlist de sortie)",
+      "rtk_module": "llm_mcp.tool_poisoning_watch (RTK-13) / llm_mcp.exfil_channels (RTK-14)",
+      "category": "LLM / MCP",
+      "severity": "critical",
+      "description": "Déploie un serveur MCP minimal (FastMCP) exposant un outil http_get sans vérification de domaine de sortie — utile pour tester la dérive de schéma d'outil et l'exfiltration de données via un canal MCP.",
+      "clouds": [
+        "aws",
+        "azure",
+        "gcp"
+      ],
+      "parameters": [
+        {
+          "key": "service_name",
+          "label": "Nom du service",
+          "default": "mcp-lab"
+        },
+        {
+          "key": "engagement_id",
+          "label": "ID d'engagement",
+          "default": "ENG-2026-LAB"
+        },
+        {
+          "key": "region",
+          "label": "Région / Location",
+          "default": "",
+          "cloud_defaults": {
+            "aws": "eu-west-3",
+            "azure": "westeurope",
+            "gcp": "europe-west1"
+          }
+        }
+      ],
+      "scripts": {
+        "aws": "#!/usr/bin/env bash\n# Scénario RTK-13/14 — serveur MCP exposé (AWS CloudShell, App Runner)\nset -euo pipefail\nSERVICE=\"{{service_name}}\"\nREGION=\"{{region}}\"\n\nmkdir -p app\ncat > app/mcp_server.py << 'PYEOF'\nfrom fastmcp import FastMCP\nimport httpx\nmcp = FastMCP(\"lab-mcp-server\")\n\n@mcp.tool()\ndef http_get(url: str) -> str:\n    # Vulnérabilité volontaire : aucune vérification de domaine de sortie\n    return httpx.get(url, timeout=5.0).text[:500]\n\nif __name__ == \"__main__\":\n    mcp.run(transport=\"http\", host=\"0.0.0.0\", port=8080)\nPYEOF\ncat > app/Dockerfile << 'EOF'\nFROM python:3.12-slim\nRUN pip install fastmcp httpx\nWORKDIR /app\nCOPY mcp_server.py .\nCMD [\"python\", \"mcp_server.py\"]\nEOF\n\naws ecr create-repository --repository-name \"$SERVICE\" --region \"$REGION\" || true\nACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)\nECR_URI=\"$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$SERVICE\"\naws ecr get-login-password --region \"$REGION\" | docker login --username AWS --password-stdin \"$ECR_URI\"\ndocker build -t \"$ECR_URI:latest\" app/\ndocker push \"$ECR_URI:latest\"\n\naws apprunner create-service --service-name \"$SERVICE\" --region \"$REGION\" \\\n  --source-configuration \"{\\\"ImageRepository\\\":{\\\"ImageIdentifier\\\":\\\"$ECR_URI:latest\\\",\\\"ImageRepositoryType\\\":\\\"ECR\\\",\\\"ImageConfiguration\\\":{\\\"Port\\\":\\\"8080\\\"}},\\\"AutoDeploymentsEnabled\\\":false}\" \\\n  --tags Key=redteam,Value=authorized Key=engagement,Value={{engagement_id}}\n\necho \"Serveur MCP déployé : $SERVICE\"\n",
+        "azure": "#!/usr/bin/env bash\n# Scénario RTK-13/14 — serveur MCP exposé (Azure Cloud Shell, Container Apps)\nset -euo pipefail\nSERVICE=\"{{service_name}}\"\nLOCATION=\"{{region}}\"\nRESOURCE_GROUP=\"rg-$SERVICE-lab\"\nENV_NAME=\"$SERVICE-env\"\n\nmkdir -p app\ncat > app/mcp_server.py << 'PYEOF'\nfrom fastmcp import FastMCP\nimport httpx\nmcp = FastMCP(\"lab-mcp-server\")\n\n@mcp.tool()\ndef http_get(url: str) -> str:\n    return httpx.get(url, timeout=5.0).text[:500]\n\nif __name__ == \"__main__\":\n    mcp.run(transport=\"http\", host=\"0.0.0.0\", port=8080)\nPYEOF\ncat > app/Dockerfile << 'EOF'\nFROM python:3.12-slim\nRUN pip install fastmcp httpx\nWORKDIR /app\nCOPY mcp_server.py .\nCMD [\"python\", \"mcp_server.py\"]\nEOF\n\naz group create --name \"$RESOURCE_GROUP\" --location \"$LOCATION\" \\\n  --tags redteam=authorized engagement=\"{{engagement_id}}\"\naz containerapp env create --name \"$ENV_NAME\" --resource-group \"$RESOURCE_GROUP\" --location \"$LOCATION\"\naz containerapp up --name \"$SERVICE\" --resource-group \"$RESOURCE_GROUP\" \\\n  --environment \"$ENV_NAME\" --source ./app --ingress external --target-port 8080\n\necho \"Serveur MCP déployé : $SERVICE\"\n",
+        "gcp": "#!/usr/bin/env bash\n# Scénario RTK-13/14 — serveur MCP exposé (Google Cloud Shell, Cloud Run)\nset -euo pipefail\nSERVICE=\"{{service_name}}\"\nREGION=\"{{region}}\"\n\nmkdir -p app\ncat > app/mcp_server.py << 'PYEOF'\nfrom fastmcp import FastMCP\nimport httpx\nmcp = FastMCP(\"lab-mcp-server\")\n\n@mcp.tool()\ndef http_get(url: str) -> str:\n    return httpx.get(url, timeout=5.0).text[:500]\n\nif __name__ == \"__main__\":\n    mcp.run(transport=\"http\", host=\"0.0.0.0\", port=8080)\nPYEOF\ncat > app/requirements.txt << 'EOF'\nfastmcp\nhttpx\nEOF\n\ngcloud run deploy \"$SERVICE\" --source app --region \"$REGION\" --allow-unauthenticated \\\n  --labels redteam=authorized,engagement={{engagement_id}}\n\necho \"Serveur MCP déployé : $(gcloud run services describe $SERVICE --region $REGION --format='value(status.url)')\"\n"
+      },
+      "cleanup": {
+        "aws": "aws apprunner list-services --region \"{{region}}\" --query \"ServiceSummaryList[?ServiceName=='{{service_name}}'].ServiceArn\" --output text | \\\n  xargs -I{} aws apprunner delete-service --region \"{{region}}\" --service-arn {}\naws ecr delete-repository --repository-name \"{{service_name}}\" --region \"{{region}}\" --force || true\n",
+        "azure": "az group delete --name \"rg-{{service_name}}-lab\" --yes --no-wait\n",
+        "gcp": "gcloud run services delete \"{{service_name}}\" --region \"{{region}}\" -q\n"
+      }
+    }
+  ]
+}
